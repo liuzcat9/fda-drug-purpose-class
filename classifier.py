@@ -27,7 +27,7 @@ def NB_classifier(train_text, y):
     # split into training and validation
     X_train, X_test, y_train, y_test = train_test_split(train_text, y, test_size=.25)
 
-    nb_pipe.fit(X_train, y_train)
+    nb_pipe.fit(train_text, y)
 
     print(nb_pipe.predict(X_train[200:202]))
     print(cross_val_score(nb_pipe, train_text, y, cv=5))
@@ -53,6 +53,8 @@ def LinearSVC_classifier(train_text, y):
     ])
 
     print(cross_val_score(svc_pipe, train_text, y, cv=5, scoring="accuracy"))
+
+    svc_pipe.fit(train_text, y)
     return svc_pipe
 
 def RF_classifier(train_text, y):
@@ -61,15 +63,6 @@ def RF_classifier(train_text, y):
         ('rf', RandomForestClassifier(n_estimators=10000, max_depth=3, n_jobs=4))
     ])
 
-    # split into training and validation
-    X_train, X_test, y_train, y_test = train_test_split(train_text, y, test_size=.25)
-
-    print("Fitting RF")
-    nb_pipe.fit(train_text, y)
-    print("Fit RF")
-    print("Number of classes: ", str(nb_pipe.named_steps['rf'].n_classes_))
-
-    print(nb_pipe.predict(X_train[200:202]))
     print(cross_val_score(nb_pipe, train_text, y, cv=5, scoring="accuracy"))
 
     # fit full data
@@ -77,19 +70,26 @@ def RF_classifier(train_text, y):
     return nb_pipe
 
 def neural_network(train_text, y):
-    # encode y output using sklearn to integers
-    label = LabelEncoder()
-    y_ints = label.fit_transform(y)
+    # process all data into tensorflow-friendly input
+    max_vocab, X_train = tokenize_nn(train_text)
+    one_hot_y = label_nn(y)
 
-    # save y labels
-    pickle.dump(label, open("nn_purpose_model/labels.pkl", 'wb'))
+    # build NN model
+    embedding_dim = 100
+    model = create_nn_model(max_vocab, embedding_dim)
 
-    one_hot_y = tf.one_hot(y_ints, 64)
+    # fit model to data
+    history = model.fit(X_train, one_hot_y,
+                        validation_split=0.2, epochs=5, verbose=True, batch_size=20)
 
+    return model
+
+# helper function to token words into keras-friendly format
+def tokenize_nn(train_text):
     # tokenize training text
     tokenizer = Tokenizer()
     tokenizer.fit_on_texts(train_text)
-    max_vocab = len(tokenizer.word_index) + 1 # reserve 0 spot
+    max_vocab = len(tokenizer.word_index) + 1  # reserve 0 spot
     print("Tokenized max vocab: ", str(max_vocab))
 
     # save tokenizer
@@ -100,9 +100,23 @@ def neural_network(train_text, y):
     # pad sequences
     X_train = pad_sequences(X_train, padding='post', maxlen=200)
 
-    # build NN model
-    embedding_dim = 100
+    return max_vocab, X_train
 
+# helper function
+def label_nn(y):
+    # encode y output using sklearn to integers
+    label = LabelEncoder()
+    y_ints = label.fit_transform(y)
+
+    # save y labels
+    pickle.dump(label, open("nn_purpose_model/labels.pkl", 'wb'))
+
+    one_hot_y = tf.one_hot(y_ints, 64)
+
+    return one_hot_y
+
+# helper function to create layers of nn model
+def create_nn_model(max_vocab, embedding_dim):
     model = keras.models.Sequential()
     model.add(keras.layers.Embedding(max_vocab, embedding_dim, input_length=200))
     model.add(keras.layers.Flatten())
@@ -113,30 +127,12 @@ def neural_network(train_text, y):
     model.add(keras.layers.Dense(64, activation='softmax'))
     model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
 
-    history = model.fit(X_train, one_hot_y,
-                        validation_split=0.2, epochs=5, verbose=True, batch_size=20)
-
-    # double check finished model works as intended
-    print("Predicting for: ")
-    print(train_text[0:5])
-    print(y[0:5], y_ints[0:5])
-    print(model.evaluate(X_train[0:5], one_hot_y[0:5]))
-    print(np.argmax(model.predict(X_train[0:5]), axis=1))
-    y_str = label.inverse_transform(np.argmax(model.predict(X_train[0:5]), axis=1))
-    print(y_str)
-
-    # double check loading pickle file works
-    y_label = pickle.load(open("nn_purpose_model/labels.pkl", 'rb'))
-    print(y[0:5], y_label.transform(y[0:5]))
-    print(model.evaluate(X_train[0:5], tf.one_hot(y_label.transform(y[0:5]), 64)))
-
     return model
 
 # function to test loaded model and label prediction
 def run_nn_model(test_text, y_test):
     # load tokenizer
     tokenizer = pickle.load(open("nn_purpose_model/tokenizer.pkl", 'rb'))
-
     X_test = tokenizer.texts_to_sequences(test_text)
 
     # pad sequences
@@ -144,9 +140,8 @@ def run_nn_model(test_text, y_test):
 
     model = keras.models.load_model("nn_purpose_model")
 
-    y_label = pickle.load(open("nn_purpose_model/labels.pkl", 'rb'))
-
     # convert y portion
+    y_label = pickle.load(open("nn_purpose_model/labels.pkl", 'rb'))
     y_ints = y_label.transform(y_test)
     y_one_hot = tf.one_hot(y_ints, 64)
 
@@ -166,19 +161,23 @@ def pickle_model(model, filename):
     dump(model, filename + ".joblib")
     print("Dumped model " + filename)
 
-if __name__ == "__main__":
-    # read processed drug dataframe and take out invalid ingredient rows
-    drug_df = pd.read_pickle("drug_df.pkl", compression="zip")
+# read processed drug dataframe and take out invalid ingredient rows
+def read_and_process_valid_df(df_pkl):
+    drug_df = pd.read_pickle(df_pkl, compression="zip")
 
     print("Full DF with purpose:")
-    print(drug_df) # 95315 rows
+    print(drug_df)  # 95315 rows
 
     print("DF with all valid ingredients:")
-    print(drug_df.dropna(subset=["active_ingredient", "inactive_ingredient"])) # 94777 rows
+    print(drug_df.dropna(subset=["active_ingredient", "inactive_ingredient"]))  # 94777 rows
 
     valid_df = drug_df.dropna(subset=["active_ingredient", "inactive_ingredient"])
 
-    # find frequency of each purpose label
+    return valid_df
+
+# obtain purpose class labels > 200 count in valid dataset
+def find_purpose_classes(valid_df):
+    # find frequency of each purpose la)bel
     purpose_freq = valid_df["purpose"].value_counts()
     print(len(purpose_freq))
 
@@ -186,22 +185,33 @@ if __name__ == "__main__":
     often_purpose_freq = purpose_freq[purpose_freq > 200]
     print(often_purpose_freq)
 
+    return often_purpose_freq
+
+# obtain training ingredient text and labels
+def get_ingredient_training_data(valid_df, often_purpose_freq):
     # use only training data of those purposes
     train_df = valid_df[valid_df["purpose"].isin(often_purpose_freq.index)]
+    y = train_df["purpose"]
     print("DF with purpose frequency > 200:")
-    print(train_df) # 44207 rows
+    print(train_df)  # 44207 rows
 
     # vectorize the text of active and inactive ingredients
     active_train_text = train_df["active_ingredient"]
     inactive_train_text = train_df["inactive_ingredient"]
     train_text = active_train_text + " " + inactive_train_text
 
-    y = train_df["purpose"]
+    return train_text, y
+
+if __name__ == "__main__":
+    valid_df = read_and_process_valid_df("drug_df.pkl")
+    often_purpose_freq = find_purpose_classes(valid_df)
+
+    train_text, y = get_ingredient_training_data(valid_df, often_purpose_freq)
 
     # model = NB_classifier(train_text, y)
     # model = RF_classifier(train_text, y)
     # 90% accuracy
-    # model = LinearSVC_classifier(train_text, y)
+    model = LinearSVC_classifier(train_text, y)
     # pickle_model(model, "purpose_model")
 
     # neural network
